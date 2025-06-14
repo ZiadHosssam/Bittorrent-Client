@@ -421,3 +421,93 @@ void exchange_peer_messages(const std::string &saved_path,
   outfile.write(piece.data(), piece.size());
   outfile.close();
 }
+
+// main function logic
+
+int main(int argc, char *argv[]) {
+  // flush after every cerr and cout
+  std::cout << std::unitbuf;
+  std::cerr << std::unitbuf;
+
+  // check if there is a command or not and then store it
+  if (argc < 2) {
+    std::cerr << "Usage: " << argv[0] << " <command> [args]" << std::endl;
+    return 1;
+  }
+  std::string command = argv[1];
+
+  // info command function
+  if (command == "info") {
+    if (argc < 3) {
+      std::cerr << "Usage: " << argv[0] << " info <torrent_file>" << std::endl;
+      return 1;
+    }
+
+    std::ifstream file(argv[2], std::ios::binary);
+    if (!file) {
+      std::cerr << "Error: Could not open file " << argv[2] << std::endl;
+      return 1;
+    }
+    std::string encoded_value((std::istreambuf_iterator<char>(file)), {});
+
+    try {
+      json torrent = decode_bencoded_value(encoded_value);
+      std::string tracker_url = select_tracker_url(torrent);
+      if (!torrent.contains("info") || !torrent["info"].is_object()) {
+        throw std::runtime_error("Missing or invalid 'info' field");
+      }
+      json info = torrent["info"];
+      if (!info.contains("length") || !info["length"].is_number()) {
+        throw std::runtime_error("Missing or invalid 'length' field");
+      }
+      if (!info.contains("piece length") || !info["piece length"].is_number()) {
+        throw std::runtime_error("Missing or invalid 'piece length' field");
+      }
+      if (!info.contains("pieces") || !info["pieces"].is_string()) {
+        throw std::runtime_error("Missing or invalid 'pieces' field");
+      }
+
+      int64_t length = info["length"].get<int64_t>();
+      int64_t piece_length = info["piece length"].get<int64_t>();
+      std::string pieces = info["pieces"].get<std::string>();
+      std::string bencoded_info = bencode(info);
+      unsigned char hash[SHA_DIGEST_LENGTH];
+      SHA1(reinterpret_cast<const unsigned char *>(bencoded_info.c_str()),
+           bencoded_info.size(), hash);
+
+      std::stringstream hex_hash;
+      hex_hash << std::hex << std::setfill('0');
+      for (int i = 0; i < SHA_DIGEST_LENGTH; ++i) {
+        hex_hash << std::setw(2) << static_cast<int>(hash[i]);
+      }
+
+      if (pieces.size() % 20 != 0) {
+        throw std::runtime_error("Invalid pieces string length");
+      }
+      std::vector<std::string> piece_hashes;
+      for (size_t i = 0; i < pieces.size(); i += 20) {
+        std::stringstream hex_piece;
+        hex_piece << std::hex << std::setfill('0');
+        for (size_t j = 0; j < 20; ++j) {
+          hex_piece << std::setw(2)
+                    << static_cast<int>(
+                           static_cast<unsigned char>(pieces[i + j]));
+        }
+        piece_hashes.push_back(hex_piece.str());
+      }
+
+      std::cout << "Tracker URL: " << tracker_url << std::endl;
+      std::cout << "Length: " << length << std::endl;
+      std::cout << "Info Hash: " << hex_hash.str() << std::endl;
+      std::cout << "Piece Length: " << piece_length << std::endl;
+      std::cout << "Piece Hashes:" << std::endl;
+      for (const auto &hash : piece_hashes) {
+        std::cout << hash << std::endl;
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "Error: " << e.what() << std::endl;
+      return 1;
+    }
+  }
+  
+}
