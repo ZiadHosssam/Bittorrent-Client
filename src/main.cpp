@@ -114,3 +114,38 @@ json decode_bencoded_value(const std::string &encoded_value) {
   return result;
 }
 
+// encode JSON value to bencode
+std::string bencode(const json &value) {
+    // decode to a stirng
+    if (value.is_string()){
+        std::string str = value.get<std::string>();
+        return std::to_string(str.size()) + ":" + str;
+    }
+    // decode to an integer
+    else if (value.is_number_integer()){
+        return "i" + std::to_string(value.get<int64_t()) + "e";
+    }
+    // decode to a list
+    else if (value.is_array()){
+        std::string result = "l";
+        for (const auto &elem : value){
+            result += bencode(elem);
+        }
+        return result + "e";
+    }
+    //encode to a dictionary
+    else if (value.is_object()){
+        std::string result = "d";
+        std::vector<std::string> keys;
+        for (auto it = value.begin(); it != value.end(); ++it){
+            keys.push_back(it.key());
+        }
+        std::sort(keys.begin(), keys.end());
+        for (const auto &key : keys){
+            result += bencode(key);
+            result += bencode(value[key]);
+        }
+        return result + "e";
+    }
+    throw std::runtime_error("Unsupported JSON type for bencoding");
+}
