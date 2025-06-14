@@ -79,4 +79,38 @@ json decode_bencoded_value(const std::string &encoded_value, size_t &pos) {
     pos++;
     return list;
   }
+
+  // decoded bencoded dictionires
+  else if (c == 'd'){
+    pos++;
+    json dict = json::object();
+    // make the functioon to decode the dictionary
+    while (pos < encoded_value.size() && encoded_value[pos] != 'e'){
+        // store each key for the whole dictionary in the end
+        json key = decode_bencoded_value(encoded_value, pos);
+        if (!key.is_string()){
+            throw std::runtime_error("Dictionary key must be string");
+        }
+        json value = decode_bencoded_value(encoded_value, pos);
+        dict[key.get<std::string>()] = value;
+    }
+    // check for errors and return the values
+    if (pos >= encoded_value.size() || encoded_value[pos] != 'e'){
+        throw std::runtime_error("Invalid dictionary: missing 'e'");
+    }
+    pos++;
+    return dict;
+  }
+    throw std::runtime_error("Invalid bencoded value at position " + std::to_string(pos));
 }
+
+// decode values using the function above
+json decode_bencoded_value(const std::string &encoded_value) {
+  size_t pos = 0;
+  json result = decode_bencoded_value(encoded_value, pos);
+  if (pos != encoded_value.size()) {
+    throw std::runtime_error("Extra data after decoding");
+  }
+  return result;
+}
+
