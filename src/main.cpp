@@ -124,7 +124,7 @@ std::string bencode(const json &value) {
   }
   // decode to an integer
   else if (value.is_number_integer()) {
-    return "i" + std::to_string(value.get < int64_t()) + "e";
+    return "i" + std::to_string(value.get<int64_t>()) + "e";
   }
   // decode to a list
   else if (value.is_array()) {
@@ -509,5 +509,369 @@ int main(int argc, char *argv[]) {
       return 1;
     }
   }
-  
+  // peers command handle
+  else if (command == "peers") {
+    if (argc < 3) {
+      std::cerr << "Usage: " << argv[0] << " peers <torrent_file>" << std::endl;
+      return 1;
+    }
+
+    std::ifstream file(argv[2], std::ios::binary);
+    if (!file) {
+      std::cerr << "Error: Could not open file " << argv[2] << std::endl;
+      return 1;
+    }
+    std::string encoded_value((std::istreambuf_iterator<char>(file)), {});
+
+    try {
+      json torrent = decode_bencoded_value(encoded_value);
+      if (!torrent.contains("info") || !torrent["info"].is_object()) {
+        throw std::runtime_error("Missing or invalid 'info' field");
+      }
+      json info = torrent["info"];
+      if (!info.contains("length") || !info["length"].is_number()) {
+        throw std::runtime_error("Missing or invalid 'length' field");
+      }
+
+      std::string tracker_url = select_tracker_url(torrent);
+      int64_t length = info["length"].get<int64_t>();
+      std::string bencoded_info = bencode(info);
+      unsigned char hash[SHA_DIGEST_LENGTH];
+      SHA1(reinterpret_cast<const unsigned char *>(bencoded_info.c_str()),
+           bencoded_info.size(), hash);
+
+      std::string encoded_info_hash =
+          url_encode_info_hash(hash, SHA_DIGEST_LENGTH);
+      std::string peer_id = "-CC0001-123456789012";
+      std::string query =
+          tracker_url + "?info_hash=" + encoded_info_hash +
+          "&peer_id=" + peer_id +
+          "&port=6881&uploaded=0&downloaded=0&left=" + std::to_string(length) +
+          "&compact=1";
+
+      CURL *curl = curl_easy_init();
+      if (!curl)
+        throw std::runtime_error("Failed to initialize CURL");
+      std::string response;
+      curl_easy_setopt(curl, CURLOPT_URL, query.c_str());
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+      CURLcode res = curl_easy_perform(curl);
+      if (res != CURLE_OK) {
+        curl_easy_cleanup(curl);
+        throw std::runtime_error("CURL request failed: " +
+                                 std::string(curl_easy_strerror(res)));
+      }
+      curl_easy_cleanup(curl);
+
+      json tracker_response = decode_bencoded_value(response);
+      if (!tracker_response.contains("peers") ||
+          !tracker_response["peers"].is_string()) {
+        throw std::runtime_error("Invalid 'peers' field: expected string");
+      }
+      std::string peers = tracker_response["peers"].get<std::string>();
+      if (peers.size() % 6 != 0) {
+        throw std::runtime_error("Invalid peers string length");
+      }
+
+      for (size_t i = 0; i < peers.size(); i += 6) {
+        std::cout << static_cast<int>(static_cast<unsigned char>(peers[i]))
+                  << "."
+                  << static_cast<int>(static_cast<unsigned char>(peers[i + 1]))
+                  << "."
+                  << static_cast<int>(static_cast<unsigned char>(peers[i + 2]))
+                  << "."
+                  << static_cast<int>(static_cast<unsigned char>(peers[i + 3]))
+                  << ":"
+                  << ((static_cast<unsigned char>(peers[i + 4]) << 8) |
+                      static_cast<unsigned char>(peers[i + 5]))
+                  << std::endl;
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "Error: " << e.what() << std::endl;
+      return 1;
+    }
+  }
+  // download peice handle
+  else if (command == "download_piece") {
+    if (argc < 6 || std::string(argv[2]) != "-o") {
+      std::cerr << "Usage: " << argv[0]
+                << " download_piece -o <save_path> <torrent_file> <piece_index>"
+                << std::endl;
+      return 1;
+    }
+    std::string saved_path = argv[3];
+    std::string file_name = argv[4];
+    int piece_index = std::atoi(argv[5]);
+
+    std::ifstream file(file_name, std::ios::binary);
+    if (!file) {
+      std::cerr << "Error: Could not open file " << file_name << std::endl;
+      return 1;
+    }
+    std::string encoded_value((std::istreambuf_iterator<char>(file)), {});
+
+    try {
+      json torrent = decode_bencoded_value(encoded_value);
+      if (!torrent.contains("info") || !torrent["info"].is_object()) {
+        throw std::runtime_error("Missing or invalid 'info' field");
+      }
+      json info = torrent["info"];
+      if (!info.contains("length") || !info["length"].is_number()) {
+        throw std::runtime_error("Missing or invalid 'length' field");
+      }
+      if (!info.contains("piece length") || !info["piece length"].is_number()) {
+        throw std::runtime_error("Missing or invalid 'piece length' field");
+      }
+      if (!info.contains("pieces") || !info["pieces"].is_string()) {
+        throw std::runtime_error("Missing or invalid 'pieces' field");
+      }
+
+      int64_t file_length = info["length"].get<int64_t>();
+      int piece_length = info["piece length"].get<int64_t>();
+      std::string pieces = info["pieces"].get<std::string>();
+      std::string tracker_url = select_tracker_url(torrent);
+
+      if (piece_index < 0 ||
+          piece_index >= static_cast<int>(pieces.size() / 20)) {
+        throw std::runtime_error("Invalid piece index");
+      }
+
+      std::string bencoded_info = bencode(info);
+      unsigned char info_hash[SHA_DIGEST_LENGTH];
+      SHA1(reinterpret_cast<const unsigned char *>(bencoded_info.c_str()),
+           bencoded_info.size(), info_hash);
+
+      std::string encoded_info_hash =
+          url_encode_info_hash(info_hash, SHA_DIGEST_LENGTH);
+      std::string peer_id = "-CC0001-123456789012";
+      std::string query = tracker_url + "?info_hash=" + encoded_info_hash +
+                          "&peer_id=" + peer_id +
+                          "&port=6881&uploaded=0&downloaded=0&left=" +
+                          std::to_string(file_length) + "&compact=1";
+
+      CURL *curl = curl_easy_init();
+      if (!curl)
+        throw std::runtime_error("Failed to initialize CURL");
+      std::string response;
+      curl_easy_setopt(curl, CURLOPT_URL, query.c_str());
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+      CURLcode res = curl_easy_perform(curl);
+      if (res != CURLE_OK) {
+        curl_easy_cleanup(curl);
+        throw std::runtime_error("CURL request failed: " +
+                                 std::string(curl_easy_strerror(res)));
+      }
+      curl_easy_cleanup(curl);
+
+      json tracker_response = decode_bencoded_value(response);
+      if (!tracker_response.contains("peers") ||
+          !tracker_response["peers"].is_string()) {
+        throw std::runtime_error("Invalid 'peers' field: expected string");
+      }
+      std::string peers = tracker_response["peers"].get<std::string>();
+      std::vector<std::pair<std::string, uint16_t>> peers_list;
+      if (peers.size() % 6 == 0) {
+        for (size_t i = 0; i < peers.size(); i += 6) {
+          std::string ip =
+              std::to_string(static_cast<unsigned char>(peers[i])) + "." +
+              std::to_string(static_cast<unsigned char>(peers[i + 1])) + "." +
+              std::to_string(static_cast<unsigned char>(peers[i + 2])) + "." +
+              std::to_string(static_cast<unsigned char>(peers[i + 3]));
+          uint16_t port = (static_cast<unsigned char>(peers[i + 4]) << 8) |
+                          static_cast<unsigned char>(peers[i + 5]);
+          peers_list.emplace_back(ip, port);
+        }
+      }
+
+      int num_pieces = (file_length + piece_length - 1) / piece_length;
+      int current_piece_length =
+          piece_index == num_pieces - 1 && file_length % piece_length != 0
+              ? file_length % piece_length
+              : piece_length;
+
+      if (peers_list.empty())
+        throw std::runtime_error("No peers available");
+
+      bool success = false;
+      std::string last_error;
+      for (const auto &peer : peers_list) {
+        try {
+          exchange_peer_messages(
+              saved_path,
+              std::string(reinterpret_cast<char *>(info_hash),
+                          SHA_DIGEST_LENGTH),
+              peer, piece_index, current_piece_length, pieces);
+          success = true;
+          std::cout << "Piece " << piece_index << " downloaded to "
+                    << saved_path << std::endl;
+          break;
+        } catch (const std::exception &e) {
+          last_error = e.what();
+          std::cerr << "Failed with peer " << peer.first << ":" << peer.second
+                    << " - " << e.what() << std::endl;
+        }
+      }
+      if (!success) {
+        throw std::runtime_error("Failed to download piece: " + last_error);
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "Error: " << e.what() << std::endl;
+      return 1;
+    }
+  }
+  // download handle
+  else if (command == "download") {
+    if (argc < 5 || std::string(argv[2]) != "-o") {
+      std::cerr << "Usage: " << argv[0]
+                << " download -o <output_file> <torrent_file>" << std::endl;
+      return 1;
+    }
+    std::string output_file = argv[3];
+    std::string torrent_file = argv[4];
+
+    std::ifstream file(torrent_file, std::ios::binary);
+    if (!file) {
+      std::cerr << "Error: Could not open file " << torrent_file << std::endl;
+      return 1;
+    }
+    std::string encoded_value((std::istreambuf_iterator<char>(file)), {});
+
+    try {
+      json torrent = decode_bencoded_value(encoded_value);
+      if (!torrent.contains("info") || !torrent["info"].is_object()) {
+        throw std::runtime_error("Missing or invalid 'info' field");
+      }
+      json info = torrent["info"];
+      if (!info.contains("length") || !info["length"].is_number()) {
+        throw std::runtime_error("Missing or invalid 'length' field");
+      }
+      if (!info.contains("piece length") || !info["piece length"].is_number()) {
+        throw std::runtime_error("Missing or invalid 'piece length' field");
+      }
+      if (!info.contains("pieces") || !info["pieces"].is_string()) {
+        throw std::runtime_error("Missing or invalid 'pieces' field");
+      }
+
+      int64_t file_length = info["length"].get<int64_t>();
+      int piece_length = info["piece length"].get<int64_t>();
+      std::string pieces = info["pieces"].get<std::string>();
+      std::string tracker_url = select_tracker_url(torrent);
+
+      std::string bencoded_info = bencode(info);
+      unsigned char info_hash[SHA_DIGEST_LENGTH];
+      SHA1(reinterpret_cast<const unsigned char *>(bencoded_info.c_str()),
+           bencoded_info.size(), info_hash);
+
+      std::string encoded_info_hash =
+          url_encode_info_hash(info_hash, SHA_DIGEST_LENGTH);
+      std::string peer_id = "-CC0001-123456789012";
+      std::string query = tracker_url + "?info_hash=" + encoded_info_hash +
+                          "&peer_id=" + peer_id +
+                          "&port=6881&uploaded=0&downloaded=0&left=" +
+                          std::to_string(file_length) + "&compact=1";
+
+      CURL *curl = curl_easy_init();
+      if (!curl)
+        throw std::runtime_error("Failed to initialize CURL");
+      std::string response;
+      curl_easy_setopt(curl, CURLOPT_URL, query.c_str());
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+      CURLcode res = curl_easy_perform(curl);
+      if (res != CURLE_OK) {
+        curl_easy_cleanup(curl);
+        throw std::runtime_error("CURL request failed: " +
+                                 std::string(curl_easy_strerror(res)));
+      }
+      curl_easy_cleanup(curl);
+
+      json tracker_response = decode_bencoded_value(response);
+      if (!tracker_response.contains("peers") ||
+          !tracker_response["peers"].is_string()) {
+        throw std::runtime_error("Invalid 'peers' field: expected string");
+      }
+      std::string peers = tracker_response["peers"].get<std::string>();
+      std::vector<std::pair<std::string, uint16_t>> peers_list;
+      if (peers.size() % 6 == 0) {
+        for (size_t i = 0; i < peers.size(); i += 6) {
+          std::string ip =
+              std::to_string(static_cast<unsigned char>(peers[i])) + "." +
+              std::to_string(static_cast<unsigned char>(peers[i + 1])) + "." +
+              std::to_string(static_cast<unsigned char>(peers[i + 2])) + "." +
+              std::to_string(static_cast<unsigned char>(peers[i + 3]));
+          uint16_t port = (static_cast<unsigned char>(peers[i + 4]) << 8) |
+                          static_cast<unsigned char>(peers[i + 5]);
+          peers_list.emplace_back(ip, port);
+        }
+      }
+
+      if (peers_list.empty())
+        throw std::runtime_error("No peers available");
+
+      std::vector<char> complete_file(file_length);
+      int num_pieces = (file_length + piece_length - 1) / piece_length;
+      for (int piece_index = 0; piece_index < num_pieces; ++piece_index) {
+        int current_piece_length =
+            piece_index == num_pieces - 1 && file_length % piece_length != 0
+                ? file_length % piece_length
+                : piece_length;
+
+        std::cout << "Downloading piece " << piece_index << "/"
+                  << num_pieces - 1 << std::endl;
+
+        bool piece_downloaded = false;
+        std::string temp_file = "/tmp/piece_" + std::to_string(piece_index);
+        for (size_t peer_idx = 0;
+             peer_idx < std::min<size_t>(3, peers_list.size()) &&
+             !piece_downloaded;
+             ++peer_idx) {
+          try {
+            exchange_peer_messages(
+                temp_file,
+                std::string(reinterpret_cast<char *>(info_hash),
+                            SHA_DIGEST_LENGTH),
+                peers_list[peer_idx], piece_index, current_piece_length,
+                pieces);
+
+            std::ifstream piece_file(temp_file, std::ios::binary);
+            if (!piece_file)
+              throw std::runtime_error("Failed to read piece");
+            piece_file.read(complete_file.data() + piece_index * piece_length,
+                            current_piece_length);
+            piece_file.close();
+            std::remove(temp_file.c_str());
+            piece_downloaded = true;
+            std::cout << "Piece " << piece_index << " downloaded" << std::endl;
+          } catch (const std::exception &e) {
+            std::cerr << "Failed with peer " << peers_list[peer_idx].first
+                      << ":" << peers_list[peer_idx].second << " - " << e.what()
+                      << std::endl;
+            std::remove(temp_file.c_str());
+          }
+        }
+        if (!piece_downloaded) {
+          throw std::runtime_error("Failed to download piece " +
+                                   std::to_string(piece_index));
+        }
+      }
+
+      std::ofstream outfile(output_file, std::ios::binary);
+      if (!outfile)
+        throw std::runtime_error("Failed to write output file");
+      outfile.write(complete_file.data(), file_length);
+      outfile.close();
+
+      std::cout << "Downloaded " << output_file << std::endl;
+    } catch (const std::exception &e) {
+      std::cerr << "Error: " << e.what() << std::endl;
+      return 1;
+    }
+  } 
+  else {
+    std::cerr << "Unknown command: " << command << std::endl;
+    return 1;
+  }
+  return 0;
 }
