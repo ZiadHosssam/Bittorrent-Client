@@ -65,5 +65,18 @@ json decode_bencoded_value(const std::string &encoded_value, size_t &pos) {
   }
 
   // decoded bencoded Lists
-  
+  else if (c == 'l'){
+    pos++;
+    json list = json::array();
+    // make a loop to decode the value inside the main function
+    while (pos < encoded_value.size() && encoded_value[pos] != 'e') {
+      list.push_back(decode_bencoded_value(encoded_value, pos));
+    }
+    // check for erros 
+    if (pos >= encoded_value.size() || encoded_value[pos] != 'e') {
+      throw std::runtime_error("Invalid list: missing 'e'");
+    }
+    pos++;
+    return list;
+  }
 }
